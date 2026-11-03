@@ -4,6 +4,11 @@ Mutable Instruments **Braids** (the macro oscillator) running as a real-time
 instrument on the original Polyend Tracker (MK66). Built with `FEATURE_BRAIDS`,
 which `core/makefile` defines for `PLATFORM=MK66` only.
 
+## Status
+
+Tested on an original Tracker (MK66) with CE 1.0.0. Experimental; not
+official Polyend firmware.
+
 ## Using it
 
 Name an instrument `BR-<model>` (for example `BR-FM`, `BR-PLUCKED`, `BR-12`;
@@ -37,6 +42,6 @@ repositories, MIT licence (each file carries its notice):
 
 `braids_upstream.cpp` compiles them as one unit (three file-local constants
 clash between the two oscillator files and are renamed there).
-`BraidsVoice.cpp` / `BraidsEngine.cpp` / `resample_taps.h` are the Tracker
-integration, ported from the binary patch in
+`BraidsEngine.cpp` / `resample_taps.h` and `core/libs/Audio/play_memory_braids.cpp`
+are the Tracker integration, ported from the binary patch in
 [mranthropology/Tracker-Firmware-Mod](https://github.com/mranthropology/Tracker-Firmware-Mod).
