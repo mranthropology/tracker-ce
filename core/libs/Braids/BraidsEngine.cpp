@@ -6,6 +6,7 @@
 #ifdef FEATURE_BRAIDS
 
 #include <arm_acle.h>
+#include <cstdio>
 #include <cstring>
 #include <new>
 
@@ -53,11 +54,23 @@ VoiceInfo voiceInfo[braidsEngine::kMaxVoices];
 // Load guard state (see audioUpdateDone). Level 0: normal; 1: no 96 kHz path;
 // 2..kMaxVoices+1: that many minus one voices silenced, costliest first.
 constexpr int kMaxShedLevel = braidsEngine::kMaxVoices + 1;
-constexpr int kRaiseAfterBlocks = 2;      // consecutive blocks over the high mark
-constexpr int kLowerAfterBlocks = 344;    // ~1 s under the low mark
+constexpr int kShedPercent = 95;          // smoothed load that sheds a step
+constexpr int kRestorePercent = 90;       // predicted load a restore must fit under
+constexpr int kClampPercent = 110;        // one block's most weight in the average (spikes)
+constexpr int kHoldBlocks = 16;           // settle time after any change
+constexpr int kRestoreBlocks = 344;       // ~1 s of fitting before a restore
+constexpr int kMaxRestoreBlocks = 344 * 16;
+constexpr int kStableBlocks = 344 * 10;   // a restore that lasts this long resets the backoff
+constexpr int kCyclesPerUs = 180;
+// Extra cost of the 96 kHz path over direct rendering, x4 (measured 2.9-3.7x
+// in total, so the extra is ~2-2.7x the direct cost).
+constexpr uint32_t k96kExtraX4 = 11;
 int shedLevel = 0;
-int overBlocks = 0;
-int underBlocks = 0;
+int smoothedUs = 0;                       // load, exponential average over ~8 blocks
+int holdBlocks = 0;
+int fitBlocks = 0;
+int restoreBlocks = kRestoreBlocks;       // grows when a restore is undone quickly
+int sinceRestore = 0;                     // blocks since the last restore, -1: none pending
 uint32_t voiceCycles[braidsEngine::kMaxVoices];   // last render cost per voice
 
 inline uint32_t cycleCount()
@@ -85,6 +98,36 @@ bool isSilenced(int voice)
             ++costlier;
     }
     return costlier < silenced;
+}
+
+bool rendersAt96k(int model);
+
+bool any96kVoice()
+{
+    for (int v = 0; v < braidsEngine::kMaxVoices; ++v)
+        if (voiceInfo[v].owner && rendersAt96k(voiceInfo[v].model))
+            return true;
+    return false;
+}
+
+// Cycles the next restore step would add: the 96 kHz path's extra for the
+// voices using it (level 1), or the cheapest silenced voice (higher levels).
+uint32_t restoreCostCycles()
+{
+    uint32_t cost = 0;
+    for (int v = 0; v < braidsEngine::kMaxVoices; ++v)
+    {
+        if (!voiceInfo[v].owner)
+            continue;
+        if (shedLevel == 1)
+        {
+            if (rendersAt96k(voiceInfo[v].model))
+                cost += voiceCycles[v] * k96kExtraX4 / 4;
+        }
+        else if (isSilenced(v) && (cost == 0 || voiceCycles[v] < cost))
+            cost = voiceCycles[v];
+    }
+    return cost;
 }
 
 const char* const kModelNames[braidsEngine::kNumModels] = {
@@ -314,29 +357,66 @@ void render(int voice, int model, int pitch, int timbre, int color, int16_t* out
 
 void audioUpdateDone(int updateUs, int periodUs)
 {
-    if (updateUs * 100 > periodUs * 90)
+    int clamp = periodUs * kClampPercent / 100;
+    smoothedUs += ((updateUs > clamp ? clamp : updateUs) - smoothedUs) / 8;
+    if (sinceRestore >= 0 && ++sinceRestore >= kStableBlocks)
     {
-        underBlocks = 0;
-        if (++overBlocks >= kRaiseAfterBlocks && shedLevel < kMaxShedLevel)
+        restoreBlocks = kRestoreBlocks;   // the last restore held
+        sinceRestore = -1;
+    }
+    if (holdBlocks > 0)
+    {
+        --holdBlocks;
+        return;
+    }
+    if (smoothedUs * 100 > periodUs * kShedPercent)
+    {
+        fitBlocks = 0;
+        if (shedLevel < kMaxShedLevel)
         {
             ++shedLevel;
-            overBlocks = 0;
+            if (shedLevel == 1 && !any96kVoice())
+                shedLevel = 2;   // nothing on the 96 kHz path to save
+            holdBlocks = kHoldBlocks;
+            if (sinceRestore >= 0 && sinceRestore < 2 * 344)   // restore undone within 2 s
+                restoreBlocks = restoreBlocks * 2 > kMaxRestoreBlocks ? kMaxRestoreBlocks : restoreBlocks * 2;
+            sinceRestore = -1;
         }
+        return;
     }
-    else if (updateUs * 100 < periodUs * 75)
+    if (shedLevel == 0)
+        return;
+    int predicted = smoothedUs + static_cast<int>(restoreCostCycles() / kCyclesPerUs);
+    if (predicted * 100 >= periodUs * kRestorePercent)
     {
-        overBlocks = 0;
-        if (++underBlocks >= kLowerAfterBlocks && shedLevel > 0)
-        {
-            --shedLevel;
-            underBlocks = 0;
-        }
+        fitBlocks = 0;
+        return;
     }
-    else
+    if (++fitBlocks >= restoreBlocks)
     {
-        overBlocks = 0;
-        underBlocks = 0;
+        --shedLevel;
+        fitBlocks = 0;
+        holdBlocks = kHoldBlocks;
+        sinceRestore = 0;
     }
+}
+
+void describeLoad(char* text, int size)
+{
+    // "BR L1 47 20 18 -k": shed level, then each voice's last render in
+    // thousand cycles ("." unused, "-" silenced).
+    int n = snprintf(text, size, "BR L%d", shedLevel);
+    for (int v = 0; v < kMaxVoices && n < size; ++v)
+    {
+        if (!voiceInfo[v].owner)
+            n += snprintf(text + n, size - n, " .");
+        else if (isSilenced(v))
+            n += snprintf(text + n, size - n, " -");
+        else
+            n += snprintf(text + n, size - n, " %u", static_cast<unsigned>((voiceCycles[v] + 500) / 1000));
+    }
+    if (n < size)
+        snprintf(text + n, size - n, "k");
 }
 
 int pitchFromRate(float rateOverC5)

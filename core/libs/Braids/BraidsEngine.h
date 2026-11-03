@@ -29,12 +29,17 @@ void noteOn(int voice, int model);
 // With `shed` false (offline export) the load guard is ignored.
 void render(int voice, int model, int pitch, int timbre, int color, int16_t* out, bool shed = true);
 
-// Load guard, called once per live audio update with its duration. Above 90%
-// of the block period the engine sheds load a step at a time: first the
-// 96 kHz models render directly (cheaper, longer decays), then the most
-// expensive voices are silenced one by one. Below 75% for about a second a
-// step is restored. Keeps the UI (main loop) from starving.
+// Load guard, called once per live audio update with its duration. When the
+// load (averaged over ~8 blocks, spikes capped) passes 95% of the block period the engine
+// sheds a step: first the 96 kHz models render directly (cheaper, longer
+// decays), then the most expensive voices are silenced one by one. A step is
+// restored once its measured cost has fitted under 90% for about a second
+// (longer if the last restore had to be undone). Keeps the UI (main loop)
+// from starving.
 void audioUpdateDone(int updateUs, int periodUs);
+
+// Guard state for the dev-mode diagnostics, e.g. "BR L1 47 20 18 -k".
+void describeLoad(char* text, int size);
 
 // Helpers for the player: playback-rate ratio -> Braids pitch, and the
 // granular grain length (samples) -> Color on a log scale.

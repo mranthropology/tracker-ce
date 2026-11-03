@@ -1,5 +1,8 @@
 #include "Platform.h"
 #include "Profiler.h"
+#ifdef FEATURE_BRAIDS
+#include "BraidsEngine.h"
+#endif
 #include "configEditor.h"
 #include "mtGridEditor.h"
 #include "mtPadsBacklight.h"
@@ -941,8 +944,12 @@ void cConfigEditor::showDiagnosticInfo()
 #ifdef MEMORY_USAGE_INFO_ENABLED
     size_t freeBytes = Profiler::getInstance()->freeRamBytes();
     snprintf(heapUsageText, sizeof(heapUsageText), "free heap: %d B", freeBytes);
+#ifdef FEATURE_BRAIDS
+    braidsEngine::describeLoad(stackUsageText, sizeof(stackUsageText));
+#else
     size_t maxStackBytes = Profiler::getInstance()->maxStackBytes();
     snprintf(stackUsageText, sizeof(stackUsageText), "max stack: %d B", maxStackBytes);
+#endif
 
     display.setControlText(memoryUsageLabelControl, heapUsageText);
     display.setControlText2(memoryUsageLabelControl, stackUsageText);
