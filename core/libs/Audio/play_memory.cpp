@@ -1,4 +1,7 @@
 #include "play_memory.h"
+#ifdef FEATURE_BRAIDS
+#include "BraidsEngine.h"
+#endif
 #include "Audio.h"
 #include "ampLogarythmicValues.h"
 #include "dspinst.h"
@@ -139,6 +142,18 @@ AUDIO_CORE_RAM void AudioPlayMemory::update(void)
     }
 
     audio_block_t* block = nullptr;
+#ifdef FEATURE_BRAIDS
+    if (braidsModel >= 0)
+    {
+        block = updateBraids();
+        if (isHeadroomEnabled)
+        {
+            lowerVolume3dB(block);
+        }
+        envelopeUpdate(block);
+        return;
+    }
+#endif
     switch (currentPlayMode)
     {
         case playModeSingleShot: block = updateSingleShot(); break;
@@ -198,6 +213,10 @@ AUDIO_CORE_FLASH uint8_t AudioPlayMemory::play(uint8_t instrIdx, int8_t note)
         default: return 0;
     }
 
+#ifdef FEATURE_BRAIDS
+    braidsNoteOn(instrIdx);
+#endif
+
     if (stackedSlide.isSlideOnPlay)
     {
         setSlidePitch(stackedSlide.upOrDown, stackedSlide.dstValue, stackedSlide.time);
@@ -235,6 +254,9 @@ uint8_t AudioPlayMemory::playForPrev(uint8_t instr_idx, int8_t n)
 
 uint8_t AudioPlayMemory::playForPrev(int16_t* addr, uint32_t len, uint8_t type)
 {
+#ifdef FEATURE_BRAIDS
+    braidsRelease();
+#endif
     uint32_t startPoint, endPoint;
     int8_t note = 60;
     playing = 0;
@@ -349,6 +371,9 @@ uint8_t AudioPlayMemory::playForPrev(int16_t* addr, uint32_t len, uint8_t type)
 
 uint8_t AudioPlayMemory::playForPrev(int16_t* addr, uint32_t len, uint8_t n, uint8_t type)
 {
+#ifdef FEATURE_BRAIDS
+    braidsRelease();
+#endif
     uint32_t startPoint, endPoint;
     int8_t note = n;
     playing = 0;
@@ -472,6 +497,9 @@ void AudioPlayMemory::stop(void)
     {
         voiceStreamManager.notifyNoteOff((uint8_t)voiceIndex);
     }
+#ifdef FEATURE_BRAIDS
+    braidsRelease();
+#endif
     AudioInterrupts();
     //	__enable_irq();
 }

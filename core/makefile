@@ -33,7 +33,7 @@ OBJS_SORTED := $(sort $(OBJS))
 OBJ_DIRS	:= $(dir $(OBJS_SORTED))
 DEPS		:= $(OBJS_SORTED:.o=.d)
 
-INCLUDES=-I./include -I./config -I./source -I./synth -I./libs -I./libs/Audio -I./libs/ElapsedMillis -I./libs/SerialFlash -I./libs/SPI -I./libs/Audio/utility -I./libs/FT812 -I./libs/fonts -I./libs/NewDisplay -I./interface -I./effector -I./FileManager -I./Exporter -I./AudioEngine -I./libs/Audio/Polyverb -I./AudioEngine/ConstantValues -I./AudioEngine/MasterEnhancer -I${POLYUTIL_DIR}/include -I${POLYUTIL_DIR}/3rdparty -I${POLYSYNTH_DIR}/include  
+INCLUDES=-I./include -I./config -I./source -I./synth -I./libs -I./libs/Audio -I./libs/ElapsedMillis -I./libs/SerialFlash -I./libs/SPI -I./libs/Audio/utility -I./libs/FT812 -I./libs/fonts -I./libs/NewDisplay -I./interface -I./effector -I./FileManager -I./Exporter -I./AudioEngine -I./libs/Audio/Polyverb -I./AudioEngine/ConstantValues -I./AudioEngine/MasterEnhancer -I./libs/Braids -I./libs/Braids/upstream -I${POLYUTIL_DIR}/include -I${POLYUTIL_DIR}/3rdparty -I${POLYSYNTH_DIR}/include  
 COMPILER_OPTIONS=-MMD -MP -fno-common -g -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -fstack-usage -specs=nano.specs -Wall -Wextra -c -ffunction-sections -fdata-sections -ffreestanding -fno-builtin 
 ifdef DEBUG
 COMPILER_OPTIONS+=-Og -DDEBUG
@@ -52,6 +52,8 @@ DEFINES += $(FW_VERSION_DEFINES) $(CUSTOM_DEFINES)
 
 ifeq ($(PLATFORM), MK66)
 COMPILER_OPTIONS+=-mcpu=cortex-m4 -mfpu=fpv4-sp-d16 
+# Mutable Instruments Braids as an instrument engine (core/libs/Braids)
+DEFINES+=-DFEATURE_BRAIDS
 else ifeq ($(PLATFORM), IMX)
 COMPILER_OPTIONS+=-mcpu=cortex-m7 -mfpu=fpv5-sp-d16 -mfp16-format=ieee
 DEFINES+=-DPLATFORM_IMX -DFEATURE_SYNTH

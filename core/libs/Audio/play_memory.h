@@ -304,6 +304,14 @@ class AudioPlayMemory : public AudioStream
     volatile uint32_t length;
     volatile uint8_t playing;
     uint8_t currentPlayMode;
+#ifdef FEATURE_BRAIDS
+    // Braids engine (core/libs/Braids): set by braidsNoteOn() for "BR-" instruments.
+    int8_t braidsVoice = -1; // braidsEngine voice held, or -1
+    int8_t braidsModel = -1; // model to render, or -1: play the sample
+    void braidsNoteOn(uint8_t instrIdx);
+    void braidsRelease();
+    audio_block_t* updateBraids();
+#endif
     uint8_t loopBackwardFlag; // kierunek playhead'a w loopie
     int8_t lastNote = -1;     // ostatnia nuta - potrzebne przy glidach i slidach
     volatile int16_t* currentStartAddress;

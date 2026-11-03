@@ -1,0 +1,277 @@
+// Braids as a Tracker instrument engine (original Tracker). Ported from the
+// fw 1.9.2 binary patch (Tracker-Firmware-Mod, braids/braids_voice.cc and
+// tracker_voice.cc); Braids itself is the unmodified upstream in upstream/.
+#include "BraidsEngine.h"
+
+#ifdef FEATURE_BRAIDS
+
+#include <arm_acle.h>
+#include <cstring>
+#include <new>
+
+#include "braids/macro_oscillator.h"
+#include "cr_section_macros.h"
+#include "resample_taps.h"
+
+using braids::MacroOscillator;
+using braids::MacroOscillatorShape;
+
+namespace
+{
+// Braids' tables are for 96 kHz. Rendering directly at the Tracker's
+// 44,117.647 Hz needs the pitch raised by 12 * log2(96000 / 44117.647)
+// semitones (Braids pitch is in 1/128 semitone).
+constexpr int16_t kPitchOffset = 1723;
+constexpr int kChunk = 24;    // Braids' internal render size on the module
+
+// 96 kHz path state, kept right after the oscillator in a voice slot.
+struct ResampleState
+{
+    int16_t history[RESAMPLE_TAPS - 1];   // last inputs, oldest first
+    uint16_t frac;                        // position within an input sample, 1/125ths
+    int16_t pending;                      // rendered sample not yet consumed
+    uint16_t hasPending;
+};
+
+struct VoiceSlot
+{
+    alignas(8) uint8_t osc[sizeof(MacroOscillator)];
+    ResampleState resample;
+};
+
+// SDRAM (not zeroed at boot): every field is set before use.
+__NOINIT(EXTERNAL_RAM) VoiceSlot voiceSlots[braidsEngine::kMaxVoices];
+
+struct VoiceInfo
+{
+    const void* owner = nullptr;
+    int8_t model = -1;          // model the oscillator was initialised for
+};
+VoiceInfo voiceInfo[braidsEngine::kMaxVoices];
+
+const char* const kModelNames[braidsEngine::kNumModels] = {
+    "CSAW", "MORPH", "SAWSQUARE", "SINETRIANGLE", "BUZZ", "SQUARESUB", "SAWSUB",
+    "SQUARESYNC", "SAWSYNC", "TRIPLESAW", "TRIPLESQUARE", "TRIPLETRIANGLE",
+    "TRIPLESINE", "TRIPLERINGMOD", "SAWSWARM", "SAWCOMB", "TOY", "DIGITALFILTERLP",
+    "DIGITALFILTERPK", "DIGITALFILTERBP", "DIGITALFILTERHP", "VOSIM", "VOWEL",
+    "VOWELFOF", "HARMONICS", "FM", "FEEDBACKFM", "CHAOTICFEEDBACKFM", "PLUCKED",
+    "BOWED", "BLOWN", "FLUTED", "STRUCKBELL", "STRUCKDRUM", "KICK", "CYMBAL",
+    "SNARE", "WAVETABLES", "WAVEMAP", "WAVELINE", "WAVEPARAPHONIC", "FILTEREDNOISE",
+    "TWINPEAKSNOISE", "CLOCKEDNOISE", "GRANULARCLOUD", "PARTICLENOISE",
+    "DIGITALMODULATION", "QUESTIONMARK",
+};
+
+inline MacroOscillator* oscillator(int voice)
+{
+    return reinterpret_cast<MacroOscillator*>(voiceSlots[voice].osc);
+}
+
+char upper(char c) { return (c >= 'a' && c <= 'z') ? c - 32 : c; }
+
+// Models whose decays are per-sample constants: rendered at 96 kHz and
+// resampled (struck bell/drum ~2.15x, snare 1.4x, particle noise ~1.5x too
+// long when rendered directly at 44.1 kHz; measured in the binary patch's m16).
+bool rendersAt96k(int model) { return model == 32 || model == 33 || model == 36 || model == 45; }
+
+// log2 for x > 0: exponent from the float bits; log(1+m) = 2*atanh(m/(m+2)).
+float log2Approx(float x)
+{
+    union
+    {
+        float f;
+        uint32_t u;
+    } v = { x };
+    int e = static_cast<int>((v.u >> 23) & 0xFF) - 127;
+    v.u = (v.u & 0x007FFFFF) | 0x3F800000;   // mantissa in [1, 2)
+    float m = v.f - 1.0f;
+    float t = m / (m + 2.0f);
+    float t2 = t * t;
+    float ln = 2.0f * t * (1.0f + t2 * (1.0f / 3 + t2 * (1.0f / 5 + t2 * (1.0f / 7 + t2 * (1.0f / 9)))));
+    return static_cast<float>(e) + ln * 1.44269504f;
+}
+
+void renderChunks(MacroOscillator* o, int16_t* out, int n)
+{
+    uint8_t sync[kChunk];
+    memset(sync, 0, sizeof(sync));
+    while (n > 0)
+    {
+        int c = n > kChunk ? kChunk : n;
+        o->Render(sync, out, c);
+        out += c;
+        n -= c;
+    }
+}
+
+// Two adjacent int16 inputs as one word (the window is only 2-byte aligned;
+// the M4's plain LDR accepts unaligned normal memory, but the compiler would
+// split it into two halfword loads).
+inline uint32_t loadPair(const int16_t* p)
+{
+    uint32_t v;
+    __asm__("ldr %0, [%1]" : "=r"(v) : "r"(p) : "memory");
+    return v;
+}
+
+// Braids at its native 96 kHz, resampled to 44,117.647 Hz by a 125-phase x
+// 32-tap polyphase low-pass (272/125). n <= 128.
+void render96k(int voice, int16_t* out, int n)
+{
+    MacroOscillator* o = oscillator(voice);
+    ResampleState* st = &voiceSlots[voice].resample;
+    constexpr int kHist = RESAMPLE_TAPS - 1;
+    uint32_t total = st->frac + static_cast<uint32_t>(n) * RESAMPLE_STEP;
+    int nIn = static_cast<int>(total / RESAMPLE_PHASES);
+    int16_t buf[kHist + (127 * RESAMPLE_STEP + RESAMPLE_STEP + RESAMPLE_PHASES) / RESAMPLE_PHASES + 2];
+    memcpy(buf, st->history, sizeof(st->history));
+    // Braids' percussion models render two samples per loop step and wrap on
+    // odd sizes, so only ever ask for an even count and carry a spare sample.
+    int pos = 0;
+    if (st->hasPending)
+    {
+        buf[kHist] = st->pending;
+        st->hasPending = 0;
+        pos = 1;
+    }
+    int rem = nIn - pos;
+    if (rem > 0)
+    {
+        int even = (rem + 1) & ~1;
+        renderChunks(o, buf + kHist + pos, even);
+        if (even != rem)
+        {
+            st->pending = buf[kHist + nIn];
+            st->hasPending = 1;
+        }
+    }
+    uint32_t u = st->frac;
+    for (int m = 0; m < n; ++m)
+    {
+        u += RESAMPLE_STEP;
+        int k = static_cast<int>(u / RESAMPLE_PHASES);   // newest input used
+        const uint32_t* h = reinterpret_cast<const uint32_t*>(kResampleTaps[u % RESAMPLE_PHASES]);
+        const int16_t* x = buf + kHist + k - (RESAMPLE_TAPS - 1);
+        int32_t acc = 0;
+        for (int t = 0; t < RESAMPLE_TAPS / 2; ++t)
+            acc = __smlad(h[t], loadPair(x + 2 * t), acc);
+        acc >>= 15;
+        out[m] = static_cast<int16_t>(acc > 32767 ? 32767 : (acc < -32768 ? -32768 : acc));
+    }
+    st->frac = static_cast<uint16_t>(total % RESAMPLE_PHASES);
+    memcpy(st->history, buf + nIn, sizeof(st->history));
+}
+} // namespace
+
+namespace braidsEngine
+{
+int parseModel(const char* name)
+{
+    char sep = name[2];
+    if (upper(name[0]) != 'B' || upper(name[1]) != 'R' || (sep != ':' && sep != '-'))
+        return -1;
+    char token[24];
+    int n = 0;
+    for (int i = 3; i < 32 && n < 23; ++i)
+    {
+        char c = upper(name[i]);
+        if (c == 0)
+            break;
+        if (c == ' ' || c == '_' || c == '-')
+            continue;
+        token[n++] = c;
+    }
+    token[n] = 0;
+    if (n == 0)
+        return 0;
+    if (token[0] >= '0' && token[0] <= '9')
+    {
+        int v = 0;
+        for (int i = 0; i < n && token[i] >= '0' && token[i] <= '9'; ++i)
+            v = v * 10 + token[i] - '0';
+        return v < kNumModels ? v : 0;
+    }
+    for (int m = 0; m < kNumModels; ++m)
+    {
+        const char* s = kModelNames[m];
+        int i = 0;
+        while (s[i] && s[i] == token[i])
+            ++i;
+        if (!s[i] && !token[i])
+            return m;
+    }
+    return 0;   // unknown name: first model
+}
+
+int acquire(const void* owner)
+{
+    int freeVoice = -1;
+    for (int v = 0; v < kMaxVoices; ++v)
+    {
+        if (voiceInfo[v].owner == owner)
+            return v;
+        if (!voiceInfo[v].owner && freeVoice < 0)
+            freeVoice = v;
+    }
+    if (freeVoice >= 0)
+        voiceInfo[freeVoice].owner = owner;
+    return freeVoice;
+}
+
+void release(int voice)
+{
+    if (voice >= 0 && voice < kMaxVoices)
+        voiceInfo[voice].owner = nullptr;
+}
+
+void noteOn(int voice, int model)
+{
+    if (voice < 0 || voice >= kMaxVoices)
+        return;
+    if (voiceInfo[voice].model != model)
+    {
+        MacroOscillator* o = new (voiceSlots[voice].osc) MacroOscillator;
+        o->Init();
+        memset(&voiceSlots[voice].resample, 0, sizeof(ResampleState));
+        voiceInfo[voice].model = static_cast<int8_t>(model);
+    }
+    oscillator(voice)->Strike();
+}
+
+void render(int voice, int model, int pitch, int timbre, int color, int16_t* out)
+{
+    MacroOscillator* o = oscillator(voice);
+    o->set_shape(static_cast<MacroOscillatorShape>(model));
+    o->set_parameters(static_cast<int16_t>(timbre), static_cast<int16_t>(color));
+    if (rendersAt96k(model))
+    {
+        o->set_pitch(static_cast<int16_t>(pitch));   // 96 kHz tables: no offset
+        render96k(voice, out, 128);
+    }
+    else
+    {
+        o->set_pitch(static_cast<int16_t>(pitch + kPitchOffset));
+        renderChunks(o, out, 128);
+    }
+    for (int i = 0; i < 128; ++i)
+        out[i] = static_cast<int16_t>(out[i] >> 1);   // -6 dB
+}
+
+int pitchFromRate(float rateOverC5)
+{
+    if (!(rateOverC5 > 0.0f))
+        rateOverC5 = 1.0f;
+    float note = 60.0f + 12.0f * log2Approx(rateOverC5);
+    int pitch = static_cast<int>(note * 128.0f + 0.5f);
+    return pitch < 0 ? 0 : (pitch > 127 * 128 ? 127 * 128 : pitch);
+}
+
+int16_t colorFromGrainLength(uint16_t samples)
+{
+    if (samples < 44)
+        samples = 44;
+    float c = log2Approx(samples / 44.0f) * (32767.0f / 9.96921f);   // log(len/44)/log(44100/44)
+    return c > 32767.0f ? 32767 : static_cast<int16_t>(c);
+}
+} // namespace braidsEngine
+
+#endif // FEATURE_BRAIDS
