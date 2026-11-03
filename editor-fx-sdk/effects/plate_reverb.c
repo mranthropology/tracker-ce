@@ -9,6 +9,9 @@
 // but float delay lines (no CPU budget to meet here) and a dry/wet mix.
 // Processed in sub-blocks of up to 128 samples; every delay is longer than
 // that, so each stage runs over a whole sub-block.
+//
+// Status: tested on an original Tracker (MK66) with CE 1.0.0. Experimental;
+// not an official Polyend plugin.
 
 #include "tracker_plugin.h"
 
