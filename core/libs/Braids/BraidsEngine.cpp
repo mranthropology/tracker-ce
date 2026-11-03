@@ -46,8 +46,46 @@ struct VoiceInfo
 {
     const void* owner = nullptr;
     int8_t model = -1;          // model the oscillator was initialised for
+    bool at96k = false;         // last block went through the 96 kHz path
 };
 VoiceInfo voiceInfo[braidsEngine::kMaxVoices];
+
+// Load guard state (see audioUpdateDone). Level 0: normal; 1: no 96 kHz path;
+// 2..kMaxVoices+1: that many minus one voices silenced, costliest first.
+constexpr int kMaxShedLevel = braidsEngine::kMaxVoices + 1;
+constexpr int kRaiseAfterBlocks = 2;      // consecutive blocks over the high mark
+constexpr int kLowerAfterBlocks = 344;    // ~1 s under the low mark
+int shedLevel = 0;
+int overBlocks = 0;
+int underBlocks = 0;
+uint32_t voiceCycles[braidsEngine::kMaxVoices];   // last render cost per voice
+
+inline uint32_t cycleCount()
+{
+#ifdef BRAIDS_HOST_TEST
+    return 0;
+#else
+    return *reinterpret_cast<volatile uint32_t*>(0xE0001004);   // DWT->CYCCNT
+#endif
+}
+
+// Silenced at the current level: among the voices in use, this one is one of
+// the (shedLevel - 1) costliest by last measured render.
+bool isSilenced(int voice)
+{
+    int silenced = shedLevel - 1;
+    if (silenced <= 0)
+        return false;
+    int costlier = 0;
+    for (int v = 0; v < braidsEngine::kMaxVoices; ++v)
+    {
+        if (v == voice || !voiceInfo[v].owner)
+            continue;
+        if (voiceCycles[v] > voiceCycles[voice] || (voiceCycles[v] == voiceCycles[voice] && v > voice))
+            ++costlier;
+    }
+    return costlier < silenced;
+}
 
 const char* const kModelNames[braidsEngine::kNumModels] = {
     "CSAW", "MORPH", "SAWSQUARE", "SINETRIANGLE", "BUZZ", "SQUARESUB", "SAWSUB",
@@ -237,13 +275,29 @@ void noteOn(int voice, int model)
     oscillator(voice)->Strike();
 }
 
-void render(int voice, int model, int pitch, int timbre, int color, int16_t* out)
+void render(int voice, int model, int pitch, int timbre, int color, int16_t* out, bool shed)
 {
+    if (voice < 0 || voice >= kMaxVoices)
+    {
+        memset(out, 0, 128 * sizeof(int16_t));
+        return;
+    }
+    if (shed && isSilenced(voice))
+    {
+        memset(out, 0, 128 * sizeof(int16_t));
+        return;
+    }
+    uint32_t start = cycleCount();
     MacroOscillator* o = oscillator(voice);
     o->set_shape(static_cast<MacroOscillatorShape>(model));
     o->set_parameters(static_cast<int16_t>(timbre), static_cast<int16_t>(color));
-    if (rendersAt96k(model))
+    if (rendersAt96k(model) && !(shed && shedLevel >= 1))
     {
+        if (!voiceInfo[voice].at96k)
+        {
+            memset(&voiceSlots[voice].resample, 0, sizeof(ResampleState));
+            voiceInfo[voice].at96k = true;
+        }
         o->set_pitch(static_cast<int16_t>(pitch));   // 96 kHz tables: no offset
         render96k(voice, out, 128);
     }
@@ -251,9 +305,38 @@ void render(int voice, int model, int pitch, int timbre, int color, int16_t* out
     {
         o->set_pitch(static_cast<int16_t>(pitch + kPitchOffset));
         renderChunks(o, out, 128);
+        voiceInfo[voice].at96k = false;
     }
     for (int i = 0; i < 128; ++i)
         out[i] = static_cast<int16_t>(out[i] >> 1);   // -6 dB
+    voiceCycles[voice] = cycleCount() - start;
+}
+
+void audioUpdateDone(int updateUs, int periodUs)
+{
+    if (updateUs * 100 > periodUs * 90)
+    {
+        underBlocks = 0;
+        if (++overBlocks >= kRaiseAfterBlocks && shedLevel < kMaxShedLevel)
+        {
+            ++shedLevel;
+            overBlocks = 0;
+        }
+    }
+    else if (updateUs * 100 < periodUs * 75)
+    {
+        overBlocks = 0;
+        if (++underBlocks >= kLowerAfterBlocks && shedLevel > 0)
+        {
+            --shedLevel;
+            underBlocks = 0;
+        }
+    }
+    else
+    {
+        overBlocks = 0;
+        underBlocks = 0;
+    }
 }
 
 int pitchFromRate(float rateOverC5)

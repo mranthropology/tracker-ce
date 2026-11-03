@@ -47,7 +47,10 @@ void AudioPlayMemory::braidsRelease()
 
 AUDIO_CORE_FLASH audio_block_t* AudioPlayMemory::updateBraids()
 {
-    if (braidsVoice < 0)
+    // One read: a preview on the main loop can release the voice mid-update.
+    const int voice = braidsVoice;
+    const int model = braidsModel;
+    if (voice < 0 || model < 0)
         return nullptr;
     audio_block_t* block = allocate();
     if (!block)
@@ -84,12 +87,13 @@ AUDIO_CORE_FLASH audio_block_t* AudioPlayMemory::updateBraids()
     uint16_t position = granular ? currentGranularPosition : instr.granular.currentPosition;
     uint16_t length = granular ? currentGranularLength : instr.granular.grainLength;
 
-    braidsEngine::render(braidsVoice,
-                         braidsModel,
+    braidsEngine::render(voice,
+                         model,
                          pitch,
                          position >> 1,
                          braidsEngine::colorFromGrainLength(length),
-                         block->data);
+                         block->data,
+                         !AudioStream::renderMode);
     return block;
 }
 

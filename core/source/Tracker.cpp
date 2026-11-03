@@ -1,5 +1,8 @@
 #include "Platform.h"
 #include "Profiler.h"
+#ifdef FEATURE_BRAIDS
+#include "BraidsEngine.h"
+#endif
 #include "TrackerImpl.h"
 #include "mtWavetableEnvelopes.h"
 #include "core/interface.h"
@@ -197,6 +200,10 @@ void TrackerImpl::updateAudioBuffers(void* left, void* right, int length)
 
     engine.updateAudioBuffers(left, right, length);
     Profiler::getInstance()->stopMeasuringAudio();
+#ifdef FEATURE_BRAIDS
+    braidsEngine::audioUpdateDone(Profiler::getInstance()->lastAudioUpdateUs(),
+                                  Profiler::audioBlockPeriodUs());
+#endif
 }
 
 void TrackerImpl::updateInputAudioBuffers(void* dataI2s, void* dataUsb, int length)
