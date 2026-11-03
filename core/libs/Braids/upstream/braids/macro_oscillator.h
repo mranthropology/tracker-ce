@@ -57,6 +57,11 @@ class MacroOscillator {
     previous_parameter_[1] = 0;
   }
   
+  // Polyend Tracker port: see DigitalOscillator::set_delay_lines.
+  inline void set_delay_lines(DelayLines* delay_lines) {
+    digital_oscillator_.set_delay_lines(delay_lines);
+  }
+
   inline void set_shape(MacroOscillatorShape shape) {
     if (shape != shape_) {
       Strike();

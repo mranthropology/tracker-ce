@@ -236,6 +236,21 @@ union DigitalOscillatorState {
   uint32_t modulator_phase;
 };
 
+// Polyend Tracker port: was an anonymous union member of DigitalOscillator.
+union DelayLines {
+  int16_t comb[kCombDelayLength];
+  int16_t ks[1025 * 4];
+  struct {
+    int8_t bridge[kWGBridgeLength];
+    int8_t neck[kWGNeckLength];
+  } bowed;
+  int16_t bore[kWGBoreLength];
+  struct {
+    int8_t jet[kWGJetLength];
+    int8_t bore[kWGFBoreLength];
+  } fluted;
+};
+
 class DigitalOscillator {
  public:
   typedef void (DigitalOscillator::*RenderFn)(const uint8_t*, int16_t*, size_t);
@@ -259,6 +274,11 @@ class DigitalOscillator {
   
   inline void set_shape(DigitalOscillatorShape shape) {
     shape_ = shape;
+  }
+
+  // Polyend Tracker port: storage for the delay lines (set before Render).
+  inline void set_delay_lines(DelayLines* delay_lines) {
+    delay_lines_ = delay_lines;
   }
   
   inline void set_pitch(int16_t pitch) {
@@ -359,19 +379,10 @@ class DigitalOscillator {
   Excitation pulse_[4];
   Svf svf_[3];
   
-  union {
-    int16_t comb[kCombDelayLength];
-    int16_t ks[1025 * 4];
-    struct {
-      int8_t bridge[kWGBridgeLength];
-      int8_t neck[kWGNeckLength];
-    } bowed;
-    int16_t bore[kWGBoreLength];
-    struct {
-      int8_t jet[kWGJetLength];
-      int8_t bore[kWGFBoreLength];
-    } fluted;
-  } delay_lines_;
+  // Polyend Tracker port: the 16 KB delay lines live outside the object
+  // (external SDRAM) so the rest of the state fits in fast internal RAM.
+  // Upstream has the union inline as `delay_lines_`.
+  DelayLines* delay_lines_;
   
   static RenderFn fn_table_[];
   

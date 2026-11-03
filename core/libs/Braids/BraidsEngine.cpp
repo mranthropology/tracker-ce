@@ -40,8 +40,12 @@ struct VoiceSlot
     ResampleState resample;
 };
 
-// SDRAM (not zeroed at boot): every field is set before use.
-__NOINIT(EXTERNAL_RAM) VoiceSlot voiceSlots[braidsEngine::kMaxVoices];
+// Oscillator state (~0.7 KB a voice) in internal RAM: it is touched every
+// sample, and SDRAM data is uncached on the MK66. Only the 16 KB delay lines,
+// used by comb, plucked, bowed, blown and fluted, stay in SDRAM (not zeroed
+// at boot, as before).
+VoiceSlot voiceSlots[braidsEngine::kMaxVoices];
+__NOINIT(EXTERNAL_RAM) braids::DelayLines delayLines[braidsEngine::kMaxVoices];
 
 struct VoiceInfo
 {
@@ -311,6 +315,7 @@ void noteOn(int voice, int model)
     if (voiceInfo[voice].model != model)
     {
         MacroOscillator* o = new (voiceSlots[voice].osc) MacroOscillator;
+        o->set_delay_lines(&delayLines[voice]);
         o->Init();
         memset(&voiceSlots[voice].resample, 0, sizeof(ResampleState));
         voiceInfo[voice].model = static_cast<int8_t>(model);
